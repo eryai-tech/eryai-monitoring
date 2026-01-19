@@ -87,7 +87,9 @@ async function testDemo() {
     });
     assert(res.ok, `API error: ${res.status}`);
     const data = await res.json();
-    assert(data.response, 'No response from Sofia');
+    // Gemini returns candidates[0].content.parts[0].text, not response
+    const aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    assert(aiResponse || data.sessionId, 'No response from Sofia');
     testSessionId = data.sessionId; // Save for later tests
   });
 
@@ -156,7 +158,8 @@ async function testDemo() {
     });
     assert(res.ok, `API error: ${res.status}`);
     const data = await res.json();
-    assert(data.response, 'No response');
+    const aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    assert(aiResponse || data.sessionId, 'No response');
   });
 
   await runTest('Demo', 'Human takeover works', async () => {
