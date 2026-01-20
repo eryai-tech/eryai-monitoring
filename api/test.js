@@ -12,12 +12,20 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const CONFIG = {
   SUPERADMIN_EMAIL: 'eric@eryai.tech',
   BELLA_ITALIA_ID: '3c6d67d9-22bb-4a3e-94ca-ca552eddb08e',
+  INTERNAL_API_KEY: process.env.INTERNAL_API_KEY,
   URLS: {
     LANDING: 'https://eryai.tech',
     DEMO: 'https://ery-ai-demo-restaurang.vercel.app',
     DASHBOARD: 'https://dashboard.eryai.tech',
     SALES: 'https://sales.eryai.tech',
     ENGINE: 'https://eryai-engine.vercel.app'
+  },
+  // Latency thresholds (ms)
+  LATENCY: {
+    AI_WARN: 3000,      // Warn if AI takes > 3s
+    AI_FAIL: 10000,     // Fail if AI takes > 10s
+    API_WARN: 1000,     // Warn if API takes > 1s
+    API_FAIL: 5000      // Fail if API takes > 5s
   }
 };
 
@@ -25,6 +33,11 @@ const CONFIG = {
 let testResults = [];
 let testSessionId = null;
 let engineSessionId = null;
+let latencyMetrics = {
+  engine: [],
+  demo: [],
+  api: []
+};
 
 // Helper: Run a test
 async function runTest(category, name, testFn) {
@@ -53,10 +66,19 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+// Helper: Track latency
+function trackLatency(category, name, duration) {
+  latencyMetrics[category] = latencyMetrics[category] || [];
+  latencyMetrics[category].push({ name, duration });
+}
+
 // ==================== LANDING PAGE TESTS ====================
 async function testLanding() {
   await runTest('Landing', 'Page loads', async () => {
+    const start = Date.now();
     const res = await fetch(CONFIG.URLS.LANDING);
+    const duration = Date.now() - start;
+    trackLatency('api', 'Landing page', duration);
     assert(res.ok, `Status: ${res.status}`);
   });
 
@@ -67,9 +89,10 @@ async function testLanding() {
   });
 }
 
-// ==================== ENGINE TESTS (NEW!) ====================
+// ==================== ENGINE TESTS ====================
 async function testEngine() {
   await runTest('Engine', 'API responds', async () => {
+    const start = Date.now();
     const res = await fetch(`${CONFIG.URLS.ENGINE}/api/chat`, {
       method: 'POST',
       headers: { 
@@ -81,6 +104,8 @@ async function testEngine() {
         slug: 'bella-italia'
       })
     });
+    const duration = Date.now() - start;
+    trackLatency('engine', 'Simple greeting', duration);
     assert(res.ok, `API error: ${res.status}`);
     const data = await res.json();
     assert(data.response, 'No response');
@@ -105,6 +130,7 @@ async function testEngine() {
   });
 
   await runTest('Engine', 'Knowledge base used', async () => {
+    const start = Date.now();
     const res = await fetch(`${CONFIG.URLS.ENGINE}/api/chat`, {
       method: 'POST',
       headers: { 
@@ -116,8 +142,9 @@ async function testEngine() {
         slug: 'bella-italia'
       })
     });
+    const duration = Date.now() - start;
+    trackLatency('engine', 'Knowledge base query', duration);
     const data = await res.json();
-    // Should mention price from knowledge base (189 kr)
     assert(data.response.includes('189') || data.response.toLowerCase().includes('kr'), 
       'Knowledge base not used - no price mentioned');
   });
@@ -157,16 +184,46 @@ async function testEngine() {
     assert(!error, `Database error: ${error?.message}`);
     assert(data.length >= 10, `Not enough actions: ${data.length}`);
   });
+
+  // AI Latency test
+  await runTest('Engine', 'AI response latency acceptable', async () => {
+    const start = Date.now();
+    const res = await fetch(`${CONFIG.URLS.ENGINE}/api/chat`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-Test-Mode': 'true'
+      },
+      body: JSON.stringify({
+        prompt: 'Jag vill boka bord för 4 personer på fredag kväll',
+        slug: 'bella-italia'
+      })
+    });
+    const duration = Date.now() - start;
+    trackLatency('engine', 'Booking request (complex)', duration);
+    
+    assert(res.ok, `API error: ${res.status}`);
+    assert(duration < CONFIG.LATENCY.AI_FAIL, 
+      `AI too slow: ${duration}ms (max: ${CONFIG.LATENCY.AI_FAIL}ms)`);
+    
+    if (duration > CONFIG.LATENCY.AI_WARN) {
+      throw new Error(`AI slow: ${duration}ms (warning threshold: ${CONFIG.LATENCY.AI_WARN}ms)`);
+    }
+  });
 }
 
 // ==================== DEMO RESTAURANT TESTS ====================
 async function testDemo() {
   await runTest('Demo', 'Page loads', async () => {
+    const start = Date.now();
     const res = await fetch(CONFIG.URLS.DEMO);
+    const duration = Date.now() - start;
+    trackLatency('api', 'Demo page', duration);
     assert(res.ok, `Status: ${res.status}`);
   });
 
   await runTest('Demo', 'Restaurant API health', async () => {
+    const start = Date.now();
     const res = await fetch(`${CONFIG.URLS.DEMO}/api/restaurant`, {
       method: 'POST',
       headers: { 
@@ -179,6 +236,8 @@ async function testDemo() {
         visitorId: 'test-visitor-monitoring'
       })
     });
+    const duration = Date.now() - start;
+    trackLatency('demo', 'Restaurant API', duration);
     assert(res.ok, `API error: ${res.status}`);
     const data = await res.json();
     const aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -221,7 +280,10 @@ async function testDemo() {
 // ==================== DASHBOARD TESTS ====================
 async function testDashboard() {
   await runTest('Dashboard', 'Login page loads', async () => {
+    const start = Date.now();
     const res = await fetch(`${CONFIG.URLS.DASHBOARD}/login`);
+    const duration = Date.now() - start;
+    trackLatency('api', 'Dashboard login', duration);
     assert(res.ok, `Status: ${res.status}`);
   });
 
@@ -236,10 +298,76 @@ async function testDashboard() {
   });
 }
 
+// ==================== PUSH NOTIFICATION TESTS ====================
+async function testPush() {
+  await runTest('Push', 'Service Worker accessible', async () => {
+    const res = await fetch(`${CONFIG.URLS.DASHBOARD}/sw.js`);
+    assert(res.ok, `Status: ${res.status}`);
+    const text = await res.text();
+    assert(text.includes('push') || text.includes('notification'), 'Not a valid service worker');
+  });
+
+  await runTest('Push', 'Manifest accessible', async () => {
+    const res = await fetch(`${CONFIG.URLS.DASHBOARD}/manifest.json`);
+    assert(res.ok, `Status: ${res.status}`);
+    const data = await res.json();
+    assert(data.name, 'Invalid manifest - no name');
+    assert(data.start_url, 'Invalid manifest - no start_url');
+  });
+
+  await runTest('Push', 'Subscribe endpoint exists', async () => {
+    const res = await fetch(`${CONFIG.URLS.DASHBOARD}/api/push/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    assert(res.status !== 404, 'Push subscribe endpoint not found');
+  });
+
+  await runTest('Push', 'Send endpoint requires API key', async () => {
+    const resNoKey = await fetch(`${CONFIG.URLS.DASHBOARD}/api/push/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customerId: 'test', title: 'Test', body: 'Test' })
+    });
+    assert(resNoKey.status === 401 || resNoKey.status === 403, 
+      `Expected 401/403 without key, got: ${resNoKey.status}`);
+
+    if (CONFIG.INTERNAL_API_KEY) {
+      const resWithKey = await fetch(`${CONFIG.URLS.DASHBOARD}/api/push/send`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-Internal-API-Key': CONFIG.INTERNAL_API_KEY
+        },
+        body: JSON.stringify({ 
+          customerId: CONFIG.BELLA_ITALIA_ID, 
+          title: '[TEST] Push Test', 
+          body: 'Monitoring system test' 
+        })
+      });
+      assert(resWithKey.ok || resWithKey.status === 200, 
+        `Push send failed with key: ${resWithKey.status}`);
+    }
+  });
+
+  await runTest('Push', 'Subscriptions table exists', async () => {
+    const { error } = await supabase
+      .from('push_subscriptions')
+      .select('id')
+      .limit(1);
+    assert(!error || !error.message.includes('does not exist'), 
+      `Table error: ${error?.message}`);
+  });
+}
+
 // ==================== SALES DASHBOARD TESTS ====================
 async function testSales() {
   await runTest('Sales', 'Login page loads', async () => {
+    const start = Date.now();
     const res = await fetch(`${CONFIG.URLS.SALES}/login`);
+    const duration = Date.now() - start;
+    trackLatency('api', 'Sales login', duration);
     assert(res.ok, `Status: ${res.status}`);
   });
 
@@ -265,7 +393,10 @@ async function testSales() {
 // ==================== SUPABASE TESTS ====================
 async function testSupabase() {
   await runTest('Supabase', 'Connection works', async () => {
+    const start = Date.now();
     const { data, error } = await supabase.from('customers').select('count').limit(1);
+    const duration = Date.now() - start;
+    trackLatency('api', 'Supabase query', duration);
     assert(!error, `Connection error: ${error?.message}`);
   });
 
@@ -280,7 +411,7 @@ async function testSupabase() {
   });
 
   await runTest('Supabase', 'Required tables exist', async () => {
-    const tables = ['customers', 'dashboard_users', 'chat_sessions', 'chat_messages', 'notifications', 'customer_ai_config', 'customer_actions'];
+    const tables = ['customers', 'dashboard_users', 'chat_sessions', 'chat_messages', 'notifications', 'customer_ai_config', 'customer_actions', 'push_subscriptions'];
     for (const table of tables) {
       const { error } = await supabase.from(table).select('count').limit(1);
       assert(!error || !error.message.includes('does not exist'), `Table ${table} missing`);
@@ -300,9 +431,63 @@ async function testEmail() {
   });
 }
 
+// ==================== LATENCY REPORT ====================
+function generateLatencyReport() {
+  const allLatencies = [
+    ...latencyMetrics.engine.map(l => ({ ...l, category: 'Engine (AI)' })),
+    ...latencyMetrics.demo.map(l => ({ ...l, category: 'Demo' })),
+    ...latencyMetrics.api.map(l => ({ ...l, category: 'API' }))
+  ];
+
+  if (allLatencies.length === 0) return '';
+
+  const avgEngine = latencyMetrics.engine.length > 0 
+    ? Math.round(latencyMetrics.engine.reduce((a, b) => a + b.duration, 0) / latencyMetrics.engine.length)
+    : 0;
+
+  const maxEngine = latencyMetrics.engine.length > 0
+    ? Math.max(...latencyMetrics.engine.map(l => l.duration))
+    : 0;
+
+  const avgApi = latencyMetrics.api.length > 0
+    ? Math.round(latencyMetrics.api.reduce((a, b) => a + b.duration, 0) / latencyMetrics.api.length)
+    : 0;
+
+  return `
+    <div class="category">
+      <div class="category-header" style="background: #dbeafe; color: #1e40af;">
+        <span>⚡ Latency Metrics</span>
+        <span>AI avg: ${avgEngine}ms | API avg: ${avgApi}ms</span>
+      </div>
+      ${allLatencies.map(l => {
+        const isWarning = l.category === 'Engine (AI)' && l.duration > CONFIG.LATENCY.AI_WARN;
+        const isSlow = l.category === 'Engine (AI)' && l.duration > CONFIG.LATENCY.AI_FAIL;
+        const statusClass = isSlow ? 'failed' : isWarning ? 'skipped' : 'passed';
+        const icon = isSlow ? '🔴' : isWarning ? '🟡' : '🟢';
+        return `
+          <div class="test">
+            <div class="test-name">
+              <span class="test-status ${statusClass}">${icon} ${l.category}: ${l.name}</span>
+            </div>
+            <span class="test-duration">${l.duration}ms</span>
+          </div>
+        `;
+      }).join('')}
+      <div class="test" style="background: #f0f9ff; border-top: 2px solid #3b82f6;">
+        <div class="test-name">
+          <span style="font-weight: 600;">📊 AI Response Summary</span>
+        </div>
+        <span class="test-duration">
+          Avg: ${avgEngine}ms | Max: ${maxEngine}ms | 
+          ${maxEngine > CONFIG.LATENCY.AI_WARN ? '⚠️ Slow' : '✅ OK'}
+        </span>
+      </div>
+    </div>
+  `;
+}
+
 // ==================== CLEANUP ====================
 async function cleanup() {
-  // Cleanup demo session
   if (testSessionId) {
     try {
       await supabase.from('chat_messages').delete().eq('session_id', testSessionId);
@@ -313,7 +498,6 @@ async function cleanup() {
     }
   }
   
-  // Cleanup engine session
   if (engineSessionId) {
     try {
       await supabase.from('chat_messages').delete().eq('session_id', engineSessionId);
@@ -341,6 +525,10 @@ async function sendFailureReport(results, duration) {
     `❌ [${f.category}] ${f.name}\n   Error: ${f.error}`
   ).join('\n\n');
 
+  const avgEngine = latencyMetrics.engine.length > 0 
+    ? Math.round(latencyMetrics.engine.reduce((a, b) => a + b.duration, 0) / latencyMetrics.engine.length)
+    : 0;
+
   const timestamp = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Stockholm' });
 
   try {
@@ -360,6 +548,7 @@ async function sendFailureReport(results, duration) {
           <p><strong>Time:</strong> ${timestamp}</p>
           <p><strong>Failed:</strong> ${failures.length} of ${results.length} tests</p>
           <p><strong>Duration:</strong> ${(duration / 1000).toFixed(1)}s</p>
+          <p><strong>AI Avg Latency:</strong> ${avgEngine}ms</p>
           
           <div style="background: #fef2f2; padding: 15px; border-radius: 8px; margin: 20px 0;">
             <h3 style="color: #dc2626; margin-top: 0;">Failed Tests:</h3>
@@ -371,17 +560,10 @@ async function sendFailureReport(results, duration) {
                style="background: #3b82f6; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">
               Run Tests Again
             </a>
-            <a href="https://eryai-monitoring.vercel.app/api/health" 
-               style="background: #6b7280; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-left: 10px;">
-              Health Check
-            </a>
           </p>
           
           <hr style="margin: 30px 0; border: none; border-top: 1px solid #e5e7eb;">
-          <p style="color: #6b7280; font-size: 12px;">
-            EryAI Monitoring System<br>
-            <a href="https://eryai-monitoring.vercel.app/api/status">Status Page</a>
-          </p>
+          <p style="color: #6b7280; font-size: 12px;">EryAI Monitoring System</p>
         </div>
       `
     });
@@ -397,12 +579,14 @@ export default async function handler(req, res) {
   testResults = [];
   testSessionId = null;
   engineSessionId = null;
+  latencyMetrics = { engine: [], demo: [], api: [] };
 
   // Run all tests
   await testLanding();
-  await testEngine();  // NEW!
+  await testEngine();
   await testDemo();
   await testDashboard();
+  await testPush();
   await testSales();
   await testSupabase();
   await testEmail();
@@ -413,10 +597,8 @@ export default async function handler(req, res) {
   const failed = testResults.filter(t => t.status === 'failed').length;
   const skipped = testResults.filter(t => t.status === 'skipped').length;
 
-  // Send failure report if any tests failed
   await sendFailureReport(testResults, duration);
 
-  // Group results by category
   const categories = {};
   testResults.forEach(t => {
     if (!categories[t.category]) {
@@ -425,7 +607,6 @@ export default async function handler(req, res) {
     categories[t.category][t.status]++;
   });
 
-  // Return HTML report
   const html = `
 <!DOCTYPE html>
 <html>
@@ -497,6 +678,8 @@ export default async function handler(req, res) {
       </div>
     </div>
 
+    ${generateLatencyReport()}
+
     ${Object.entries(categories).map(([cat, stats]) => `
       <div class="category">
         <div class="category-header ${stats.failed > 0 ? 'has-failures' : 'all-passed'}">
@@ -506,7 +689,7 @@ export default async function handler(req, res) {
         ${testResults.filter(t => t.category === cat).map(t => `
           <div class="test">
             <div class="test-name">
-              <span class="test-status ${t.status}">${t.status === 'passed' ? '✅' : t.status === 'failed' ? '❌' : '⏭️'}${t.name}</span>
+              <span class="test-status ${t.status}">${t.status === 'passed' ? '✅' : t.status === 'failed' ? '❌' : '⏭️'} ${t.name}</span>
             </div>
             <span class="test-duration">${t.duration}ms</span>
           </div>
@@ -522,7 +705,7 @@ export default async function handler(req, res) {
     </div>
 
     <div class="timestamp">
-      Test run: ${new Date().toISOString().replace('T', ' ').substring(0, 19)}
+      Test run: ${new Date().toISOString().replace('T', ' ').substring(0, 19)} | Total: ${passed + failed + skipped} tests
     </div>
   </div>
 </body>
