@@ -2,11 +2,7 @@
   "name": "eryai-monitoring",
   "version": "1.0.0",
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
-    "resend": "^2.0.0",
-    "devDependencies": {
-      "typescript": "^5.0.0"
-    }
+    "@supabase/supabase-js": "^2.39.0"
   },
   "devDependencies": {
     "typescript": "^5.0.0"
